@@ -16,7 +16,6 @@
 #define PRIME_WORD_DENSITY      (PRIME_WORD_BITS * 2)
 #define PRIME_MEM_WORDS(_p_)    (((_p_) + PRIME_WORD_DENSITY - 1) / PRIME_WORD_DENSITY)
 
-/* Flip a bit corresponding to a potential prime, p */
 static inline void
 flip(unsigned long long p, unsigned long long offset, unsigned long *mem)
 {
@@ -57,38 +56,7 @@ isqrt(unsigned long long x)
     return ((large*large) > x) ? small : large;
 }
 
-/* Return the square root mod 12, or zero for a quadratic non-residue. */
-static unsigned int
-sqrt_mod12(int x)
-{
-    if (x < 0) x += 12;
-    switch (x) {
-        case 1:
-            return 1;
-        case 4:
-            return 2;
-        case 9:
-            return 3;
-        default:
-            return 0;
-    }
-}
-
-static void
-atkin_skiptab(unsigned int *tab)
-{
-    unsigned int i, n;
-    for (i = 0; i < 12; i++) {
-        for (n = 1; n < 12; n++) {
-            unsigned int modulo = ((2*i + n) * n) % 12;
-            if (!modulo) break;
-        }
-        tab[i] = n;
-    }
-}
-
 struct worker_data {
-    pthread_mutex_t     mutex;
     unsigned int        workers;    /* Number of worker threads to use. */
     unsigned long long  offset;     /* The minimum prime to start at. */
     unsigned long long  pmax;       /* The maximum prime desired */
@@ -302,36 +270,7 @@ eratosthenes_sieve(struct worker_data *data)
     data->p = 3;
     data->x = data->offset;
 
-    /* Windowed version - requires a precomputed lowprime table. */
-    if (data->offset && !data->lowprimes) {
-        struct worker_data precompute = {
-            .mutex = PTHREAD_MUTEX_INITIALIZER,
-            .workers = 1,
-            .offset = 0,
-            .pmax = data->psqrt,
-            .psqrt = isqrt(data->psqrt),
-        };
-        precompute.mem = malloc(PRIME_MEM_WORDS(data->psqrt) * sizeof(unsigned long));
-        if (!precompute.mem) {
-            fprintf(stderr, "Memory allocation failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
-        }
-        eratosthenes_sieve(&precompute);
-        data->lowprimes = precompute.mem;
-    }
-    /* Otherwise, precompute enough prime numbers to give each worker one block. */
-    else if (!data->lowprimes) {
-        unsigned long lowprimes[data->workers];
-        struct worker_data precompute = {
-            .mutex = PTHREAD_MUTEX_INITIALIZER,
-            .workers = 1,
-            .offset = 0,
-            .pmax = PRIME_WORD_DENSITY * data->workers,
-            .psqrt = isqrt(PRIME_WORD_DENSITY * data->workers),
-            .mem = data->mem,
-            .lowprimes = data->mem,
-        };
-        eratosthenes_sieve(&precompute);
+    if (!data->lowprimes) {
         data->lowprimes = data->mem;
     }
 
@@ -429,7 +368,6 @@ main(int argc, char * const argv[])
     const char *precomp = NULL;
     unsigned int output_type = OUTPUT_DECIMAL;
     struct worker_data data = {
-        .mutex = PTHREAD_MUTEX_INITIALIZER,
         .workers = 1,
         .offset = 0,
         .pmax = 1000000,
@@ -511,7 +449,6 @@ main(int argc, char * const argv[])
     /* Precomputation is required for windowed algorithms. */
     if (data.offset && !data.lowprimes) {
         struct worker_data precompute = {
-            .mutex = PTHREAD_MUTEX_INITIALIZER,
             .workers = 1,
             .offset = 0,
             .pmax = data.psqrt,
@@ -542,15 +479,7 @@ main(int argc, char * const argv[])
             if (test(p, data.offset, data.mem)) fprintf(stdout, "%llu\n", p);
         }
     }
-    /* Write the raw bitmap of primes. */
-    /*
-     * Using a wheel factorization mod 60, we can improve the memory storage efficiency
-     * from 128 integers per long to 128*60/16 integers per long (ie: only 16 possible
-     * primes per group of 60 integers), but does this really improve anything vs just
-     * throwing the resulting file through gzip?
-     *
-     * Better yet, store the run-length encoding, aka the prime gaps?
-     */
+    /* Write the raw bitmask of primes. */
     else if (output_type == OUTPUT_RAW) {
         unsigned long nwords = PRIME_MEM_WORDS(data.pmax - data.offset);
         unsigned long offset = 0;
