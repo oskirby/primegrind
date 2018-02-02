@@ -47,7 +47,7 @@ isqrt(unsigned long long x)
 {
     unsigned long small, large;
     if (x < 2) {
-        return 1;
+        return x;
     }
     small = isqrt(x >> 2) << 1;
     large = small+1;
@@ -96,85 +96,84 @@ struct worker_data {
     unsigned long       *lowprimes; /* Table of precomputed low primes. */
 };
 
-/* Inner loop of the Sieve of Aktin, computes all potentially prime solutions
- * of the set of Diophantine equations:
- *      4*x^2 + y^2 == p for p == 1 mod 4
- *      3*x^2 + y^2 == p for p == 7 mod 12
- *      3*x^2 - y^2 == p for p == 11 mod 12
- *
- * And flips the 'possibly prime' bit corresponding to the prime. A number in
- * that remains in this set will either be prime, or will contain a square of a
- * prime in its factorization.
+/* Inner loop of the Sieve of Aktin, for solutions to 4x^2 + y^2 == 1 mod 4.
  */
 static void
-atkin_inner(struct worker_data *data, unsigned long x)
+atkin_inner_4x(struct worker_data *data, unsigned long long xsqr)
 {
-    /* Some precompute acceleration */
-    unsigned long long x2 = (unsigned long long)x*x;
-    unsigned int residue;
-    unsigned int xmod = 3*x2 % 12;
-    unsigned long y;
-
-    /*
-     * For any given y^2 == r mod 12, we can solve
-     *      (y+n)^2 == r mod 12, as
-     *      2y*n + n^2 == 0 mod 12.
-     *
-     * This gives us the spacing between adjacent squares with
-     * the same remainder mod 12 for a given value of y. The
-     * solutions to this equation are used as a lookup table
-     * for the inner loops.
-     */
-    unsigned int skiptab[12] = {
-        6, 4, 2, 6, 4, 2, 6, 4, 2, 6, 4, 2
-    };
-
-    /* Test for primes satisfying p = 4*x*x + y*y when p == 1 mod 4 */
-    /* Since 4*x^2 == 0 mod 4, we are interested in solutions to
-     * y^2 == 1 mod 4, which is true for all odd values of y.
-     */
-    for (y = 1;; y += 2) {
-        unsigned long long p = 4*x2 + y*y;
+    unsigned long y = 1;
+    if (4*xsqr >= data->pmax) return;
+    if (4*xsqr < data->offset) {
+        y = isqrt(data->offset - 4*xsqr) | 1;
+    }
+    while (1) {
+        unsigned long long p = 4*xsqr + y*y;
         if (p >= data->pmax) break;
         flip(p, data->offset, data->mem);
+        y += 2;
+    }
+}
+
+/* Inner loop of the Sieve of Aktin for solutions to 3*x^2 + y^2 == 7 mod 12 */
+static void
+atkin_inner_3xplus(struct worker_data *data, unsigned long long xsqr)
+{
+    /*
+     * If x^2 is even, then 3x^2 == 0 mod 12, but, 7 is not a quadratic residue
+     * mod 12. Therefore there should be no integer solutions for even x^2.
+     *
+     * If x^2 is odd, then 3x^2 == 3 mod 12, and therefore y^2 == 4 mod 12, which
+     * will have solutions for y==2 mod 6 and y==4 mod 6.
+     */
+    unsigned long y = 2;
+    if (!(xsqr & 1)) return;
+    if (3*xsqr >= data->pmax) return;
+    if (3*xsqr < data->offset) {
+        y = isqrt(data->offset - 3*xsqr);
+        y -= (y % 6);
+        y += 2;
     }
 
-    /* Test for primes satisfying p = 3*x*x + y*y when p == 7 mod 12 */
-    /*
-     * Shuffle some things around to get y*y == (7 - 3*x*x) mod 12, which
-     * will only have integer solutions when (7 - 3*x*x) mod 12 is a
-     * quadratic residue.
-     */
-    residue = (xmod > 7) ? (19 - xmod) : (7 - xmod);
-    y = sqrt_mod12(residue);
-    if (y) {
-        /*
-         * Note the periodicity in skiptab used to speed up the inner loop,
-         * there is probably an explaination for this that has to do with
-         * the residues of 2y*n + n^2 == 0 mod 12.
-         */
+    while (1) {
+        unsigned long long p = 3*xsqr + y*y;
+        if (p >= data->pmax) break;
+        flip(p, data->offset, data->mem);
+        p += (4*y + 4); /* p = 3x^2 + (y+2)^2 */
+        if (p >= data->pmax) break;
+        flip(p, data->offset, data->mem);
+        y += 6;
+    }
+}
+
+/* Inner loop of the Sieve of Aktin for solutions to 3*x^2 - y^2 == 11 mod 12 */
+static void
+atkin_inner_3xminus(struct worker_data *data, unsigned long x, unsigned long long xsqr)
+{
+    /* With y < y, this will give solutions in the range 2x^2 < p < 3x^2 */
+    unsigned long y = 0;
+    if (3*xsqr < data->offset) return;
+    if (3*xsqr >= data->pmax) {
+        y = isqrt(3*xsqr - data->pmax);
+        y -= (y % 6);
+    }
+
+    /* For x^2 odd, 3x^2 == 3 mod 12, and we seek soltutions with y^2 == 1 mod 12. */
+    if (xsqr & 1) {
+        y += 2;
         unsigned int skip =  6 - (y % 3)*2;
-        while (1) {
-            unsigned long long p = 3*x2 + y*y;
-            if (p >= data->pmax) break;
-            flip(p, data->offset, data->mem);
+        while (y < x) {
+            unsigned long long p = 3*xsqr - y*y;
+            if (p < data->pmax) flip(p, data->offset, data->mem);
             y += skip;
             if (skip != 6) skip = 6 - skip;
         }
     }
-
-    /* Test for primes satisfying p = 3*x*x - y*y when p == 11 mod 12 and x>y */
-    /*
-     * Shuffle some things around to get y*y == (3*x*x - 11) mod 12, which
-     * will only have integer solutions when (3*x*x - 11) mod 12 is a
-     * quadratic residue.
-     */
-    residue = (xmod + 1);
-    y = sqrt_mod12(residue);
-    if (y) {
+    /* Otherwise, 3x^2 == 0 mod 12, so we seek solutions with y^2 == 1 mod 12. */
+    else {
+        y += 1;
         unsigned int skip =  6 - (y % 3)*2;
         while (y < x) {
-            unsigned long long p = 3*x2 - y*y;
+            unsigned long long p = 3*xsqr - y*y;
             if (p < data->pmax) flip(p, data->offset, data->mem);
             y += skip;
             if (skip != 6) skip = 6 - skip;
@@ -188,11 +187,12 @@ atkin_clear_squares(struct worker_data *data, unsigned long p)
     unsigned long long psquare = (unsigned long long)p * p;
     unsigned long long i = psquare;
     if (i < data->offset) {
-        i = data->offset + psquare - (data->offset % psquare);
+        i = data->offset - (data->offset % psquare);
+        if (!(i & 1)) i += psquare;
     }
     while (i < data->pmax) {
         clear(i, data->offset, data->mem);
-        i += psquare;
+        i += psquare + psquare;
     }
 }
 
@@ -203,10 +203,14 @@ atkin_worker(void *arg)
     struct worker_data *data = arg;
 
     /* Eliminate squarefree composite numbers. */
+    /* The maximum value of x is given by the pmax == 3x^2-y^2 when x=y, or pmax == 2x^2 */
     do {
         unsigned long long x = __atomic_fetch_add(&data->x, 1, __ATOMIC_ACQUIRE);
-        if (x >= data->psqrt) break;
-        atkin_inner(data, x);
+        unsigned long long xsqr = x*x;
+        if (xsqr >= data->pmax/2) break;
+        atkin_inner_4x(data, xsqr);
+        atkin_inner_3xplus(data, xsqr);
+        atkin_inner_3xminus(data, x, xsqr);
     } while(1);
 
     /* Eliminate the squares of primes. */
@@ -259,13 +263,14 @@ atkin_sieve(struct worker_data *data)
 static void
 eratosthenes_clear_multiples(struct worker_data *data, unsigned long long p)
 {
-    unsigned long long i = p+p;
+    unsigned long long i = 3*p;
     if (i < data->offset) {
         i = data->offset + p - (data->offset % p);
+        if (!(i & 1)) i += p;
     }
     while (i < data->pmax) {
         clear(i, data->offset, data->mem);
-        i += p;
+        i += p+p;
     }
 }
 
