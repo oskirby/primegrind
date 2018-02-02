@@ -2,8 +2,11 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include <time.h>
 #include <getopt.h>
+#include <sys/mman.h>
 #include <sys/time.h>
 #include <pthread.h>
 
@@ -96,8 +99,7 @@ struct worker_data {
     unsigned long       *lowprimes; /* Table of precomputed low primes. */
 };
 
-/* Inner loop of the Sieve of Aktin, for solutions to 4x^2 + y^2 == 1 mod 4.
- */
+/* Inner loop of the Sieve of Aktin, for solutions to 4x^2 + y^2 == 1 mod 4. */
 static void
 atkin_inner_4x(struct worker_data *data, unsigned long long xsqr)
 {
@@ -114,7 +116,7 @@ atkin_inner_4x(struct worker_data *data, unsigned long long xsqr)
     }
 }
 
-/* Inner loop of the Sieve of Aktin for solutions to 3*x^2 + y^2 == 7 mod 12 */
+/* Inner loop of the Sieve of Aktin for solutions to 3x^2 + y^2 == 7 mod 12 */
 static void
 atkin_inner_3xplus(struct worker_data *data, unsigned long long xsqr)
 {
@@ -145,7 +147,7 @@ atkin_inner_3xplus(struct worker_data *data, unsigned long long xsqr)
     }
 }
 
-/* Inner loop of the Sieve of Aktin for solutions to 3*x^2 - y^2 == 11 mod 12 */
+/* Inner loop of the Sieve of Aktin for solutions to 3x^2 - y^2 == 11 mod 12 */
 static void
 atkin_inner_3xminus(struct worker_data *data, unsigned long x, unsigned long long xsqr)
 {
@@ -157,7 +159,7 @@ atkin_inner_3xminus(struct worker_data *data, unsigned long x, unsigned long lon
         y -= (y % 6);
     }
 
-    /* For x^2 odd, 3x^2 == 3 mod 12, and we seek soltutions with y^2 == 1 mod 12. */
+    /* For x^2 odd, 3x^2 == 3 mod 12, and we seek soltutions with y^2 == 4 mod 12. */
     if (xsqr & 1) {
         y += 2;
         unsigned int skip =  6 - (y % 3)*2;
@@ -359,9 +361,10 @@ usage(int argc, char * const argv[])
     fprintf(stdout, "options:\n");
     fprintf(stdout, "\t-a       use the Sieve of Aktin algorithm\n");
     fprintf(stdout, "\t-e       use the Sieve of Eratosthenes algorithm\n");
+    fprintf(stdout, "\t-p FILE  use precomputed bitmask of small primes from FILE\n");
     fprintf(stdout, "\t-s PMIN  search for prime numbers starting from PMIN\n");
-    fprintf(stdout, "\t-j NUM   distribute work amongst NUM threads");
-    fprintf(stdout, "\t-r       output raw binary bitmask of even primes\n");
+    fprintf(stdout, "\t-j NUM   distribute work amongst NUM threads\n");
+    fprintf(stdout, "\t-r       output raw binary bitmask of odd primes\n");
     fprintf(stdout, "\t-q       do not output primes, just perform timing\n");
     fprintf(stdout, "\t-h       display this message and exit\n");
 }
@@ -422,13 +425,15 @@ main(int argc, char * const argv[])
 
     unsigned long long msec;
     void (*algo)(struct worker_data *) = atkin_sieve;
-    const char *shortopts = "aerqs:j:h";
+    const char *shortopts = "aerqp:s:j:h";
+    const char *precomp = NULL;
     unsigned int output_type = OUTPUT_DECIMAL;
     struct worker_data data = {
         .mutex = PTHREAD_MUTEX_INITIALIZER,
         .workers = 1,
         .offset = 0,
-        .pmax = 1000000
+        .pmax = 1000000,
+        .lowprimes = NULL
     };
 
     int c;
@@ -440,6 +445,9 @@ main(int argc, char * const argv[])
                 break;
             case 'e':
                 algo = eratosthenes_sieve;
+                break;
+            case 'p':
+                precomp = optarg;
                 break;
             case 's':
                 data.offset = parse_bigint(optarg, "PMIN");
@@ -474,12 +482,28 @@ main(int argc, char * const argv[])
         }
     }
 
+
     /* Setup the space for prime number crunching. */
     data.psqrt = isqrt(data.pmax);
     data.mem = malloc(PRIME_MEM_WORDS(data.pmax - data.offset) * sizeof(unsigned long));
     if (!data.mem) {
         fprintf(stderr, "Memory allocation failed: %s\n", strerror(errno));
         return EXIT_FAILURE;
+    }
+
+    /* If a precompute file was provided, mmap it. */
+    if (precomp) {
+        int fd = open(precomp, O_RDONLY);
+        if (fd < 0) {
+            fprintf(stderr, "Failed to open precompute file: %s\n", strerror(errno));
+            return EXIT_FAILURE;
+        }
+        /* Map the precompute file into memory */
+        data.lowprimes = mmap(NULL, PRIME_MEM_WORDS(data.psqrt) * sizeof(unsigned long), PROT_READ, MAP_PRIVATE, fd, 0);
+        if (data.lowprimes == MAP_FAILED) {
+            fprintf(stderr, "Failed to map precompute file: %s\n", strerror(errno));
+            return EXIT_FAILURE;
+        }
     }
 
     /* Run the prime generator algorithm */
